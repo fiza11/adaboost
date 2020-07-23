@@ -1,8 +1,10 @@
 #ifndef ADABOOST_UTILS_CUDA_WRAPPERS_HPP
 #define ADABOOST_UTILS_CUDA_WRAPPERS_HPP
 
-#include<cuda.h>
-#include<cuda_runtime.h>
+// #include<cuda.h>
+// #include<cuda_runtime.h>
+#include "/usr/include/linux/cuda.h"
+#include "/usr/local/cuda-11.0/targets/x86_64-linux/include/cuda_runtime.h"
 
 namespace adaboost
 {

@@ -141,24 +141,98 @@ namespace adaboost
             }
 
             template <class data_type_matrix>
+            __device__
+            data_type_matrix get_element(
+            data_type_matrix* mat,
+            unsigned row,
+            unsigned col,
+            unsigned stride)
+            {
+                return mat[row*stride+col];
+            }
+
+            template <class data_type_matrix>
+            __device__
+            void set_element(
+            data_type_matrix* mat,
+            unsigned row,
+            unsigned col,
+            data_type_matrix value,
+            unsigned stride)
+            {
+                mat[row*stride+col] = value;
+            }
+
+            template <class data_type_matrix>
+            __device__
+            data_type_matrix* get_sub_matrix(
+            data_type_matrix* mat,
+            unsigned block_row,
+            unsigned block_col,
+            unsigned stride)
+            {
+                data_type_matrix* mat_sub =
+                new data_type_matrix[BLOCK_SIZE*BLOCK_SIZE];
+                mat_sub = &mat[stride*BLOCK_SIZE*block_row+BLOCK_SIZE*block_col];
+                return mat_sub;
+            }
+
+            template <class data_type_matrix>
             __global__
             void multiply_kernel(
             data_type_matrix* mat1,
             data_type_matrix* mat2,
             data_type_matrix* result,
-            unsigned mat1_rows,
             unsigned mat1_cols,
-            unsigned mat2_rows,
-            unsigned mat2_cols)
+			unsigned mat1_rows,
+            unsigned mat2_cols,
+			unsigned mat2_rows,
+            unsigned result_cols,
+			unsigned result_rows)
             {
+                unsigned block_row = blockIdx.y;
+                unsigned block_col = blockIdx.x;
+                data_type_matrix* result_sub = get_sub_matrix(result, block_row,
+                                                              block_col, result_cols);
+
+                unsigned row = threadIdx.y;
+                unsigned col = threadIdx.x;
+
+				__shared__ data_type_matrix mat1_shared[BLOCK_SIZE][BLOCK_SIZE];
+                __shared__ data_type_matrix mat2_shared[BLOCK_SIZE][BLOCK_SIZE];
                 data_type_matrix cvalue = 0.0;
-                unsigned row = blockIdx.y*blockDim.y + threadIdx.y;
-                unsigned col = blockIdx.x*blockDim.x + threadIdx.x;
-                if(row > mat1_rows || col > mat2_cols)
-                    return ;
-                for(unsigned e = 0; e < mat1_cols; e++)
-                    cvalue += mat1[row*mat1_cols+e] * mat2[e*mat2_cols+col];
-                result[row*mat2_cols+col] = cvalue;
+
+                for(unsigned m = 0; m < (mat1_cols + BLOCK_SIZE - 1)/BLOCK_SIZE; m++)
+                {
+                    data_type_matrix* mat1_sub = get_sub_matrix(mat1, block_row,
+                                                                m, mat1_cols);
+                    data_type_matrix* mat2_sub = get_sub_matrix(mat2, m,
+                                                                block_col, mat2_cols);
+
+
+					if (m*BLOCK_SIZE + col < mat1_cols && (block_row*BLOCK_SIZE+ row) < mat1_rows)
+	                    mat1_shared[row][col] = get_element(mat1_sub, row, col, mat1_cols);
+					else
+						mat1_shared[row][col]=0;
+
+					if (m*BLOCK_SIZE + row < mat2_rows && (block_col*BLOCK_SIZE+col) < mat2_cols)
+    	                mat2_shared[row][col] = get_element(mat2_sub, row, col, mat2_cols);
+					else
+						mat2_shared[row][col]=0;
+
+                    __syncthreads();
+
+                    for(unsigned e = 0; e < BLOCK_SIZE; e++)
+                    {
+                        cvalue += mat1_shared[row][e] * mat2_shared[e][col];
+                    }
+
+                    __syncthreads();
+
+                }
+				if(block_row*BLOCK_SIZE+ row<result_rows && block_col*BLOCK_SIZE+col<result_cols)
+                    set_element(result_sub, row, col, cvalue, result_cols);
+
             }
 
             template <class data_type_matrix>
@@ -168,22 +242,125 @@ namespace adaboost
             {
                 adaboost::utils::check(mat1.get_cols() == mat2.get_rows(),
                                        "Order of matrices don't match.");
-                dim3 gridDim((mat2.get_cols() + BLOCK_SIZE - 1)/BLOCK_SIZE,
-                             (mat1.get_rows() + BLOCK_SIZE - 1)/BLOCK_SIZE);
+                dim3 gridDim((mat2.get_cols() + BLOCK_SIZE)/BLOCK_SIZE,
+                             (mat1.get_rows() + BLOCK_SIZE)/BLOCK_SIZE);
                 dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
                 multiply_kernel
                 <<<gridDim, blockDim>>>
                 (mat1.get_data_pointer(),
                  mat2.get_data_pointer(),
                  result.get_data_pointer(),
-                 mat1.get_rows(),
                  mat1.get_cols(),
-                 mat2.get_rows(),
-                 mat2.get_cols());
+				 mat1.get_rows(),
+                 mat2.get_cols(),
+				 mat2.get_rows(),
+                 result.get_cols(),
+				 result.get_rows());
+            }
+
+            template <class data_type_vec, class data_type_ret>
+            __global__
+            void find_maximum_kernel(
+            data_type_ret (*func_ptr)(data_type_vec),
+            data_type_vec *vec,
+            data_type_vec *max,
+            int *mutex,
+            unsigned int size)
+            {
+                // unsigned int index = threadIdx.x + blockIdx.x*blockDim.x;
+                // unsigned int stride = gridDim.x*blockDim.x;
+                // unsigned int offset = 0;
+
+                // __shared__ float cache[MAX_BLOCK_SIZE];
+
+
+                // float temp = func_ptr(vec[index + offset]);
+                // while(index + offset < size){
+                //     temp = fmaxf(temp, func_ptr(vec[index + offset]));
+
+                //     offset += stride;
+                // }
+
+                // cache[threadIdx.x] = temp;
+
+                // __syncthreads();
+
+
+                // // reduction
+                // unsigned int i = blockDim.x/2;
+                // while(i != 0){
+                //     if(threadIdx.x < i){
+                //         cache[threadIdx.x] = fmaxf(cache[threadIdx.x], cache[threadIdx.x + i]);
+                //     }
+
+                //     __syncthreads();
+                //     i /= 2;
+                // }
+
+                // if(threadIdx.x == 0){
+                //     while(atomicCAS(mutex,0,1) != 0);  //lock
+                //     *max = fmaxf(*max, cache[0]);
+                //     atomicExch(mutex, 0);  //unlock
+                // }
+                * max = func_ptr(1);
+                // * max = 2;
+            }
+
+            // template <class data_type_vec, class data_type_ret>
+            // using func_t = data_type_ret (*)(data_type_vec);
+
+            template <class data_type_vec, class data_type_ret>
+            void Argmax(
+                func_t<data_type_vec,data_type_ret> p_func,
+                const VectorGPU<data_type_vec>& vec,
+                data_type_vec& result,
+                unsigned block_size)
+            {
+                bool gpu=true;
+                if (block_size==0){
+                    throw "Block size cannot be 0";
+                }
+                else{
+                    data_type_vec * d_max;
+                    int * d_mutex;
+
+                    adaboost::utils::cuda::cuda_malloc((void**)&d_max, sizeof(data_type_vec));
+                    cudaMalloc((void**)&d_mutex, sizeof(int));
+
+                    cudaMemset(d_max, p_func(vec.at(0)), sizeof(data_type_vec));
+                    cudaMemset(d_mutex, 0, sizeof(int));
+
+                    func_t<data_type_vec, data_type_ret> *p_func = new func_t<data_type_vec, data_type_ret>;
+                    // p_func=(func_t<data_type_vec, data_type_ret>)(p_func);
+                    func_t<data_type_vec, data_type_ret> h_func;
+                    // cudaGetSymbolAddress((void **)&h_func, r_func);
+                    // cudaMemcpy(h_func, p_func, sizeof(adaboost::cuda::core::func_t<data_type_vec, data_type_ret>), cudaMemcpyHostToDevice);
+                    cudaMemcpyFromSymbol(&h_func, p_func, sizeof(adaboost::cuda::core::func_t<data_type_vec, data_type_ret>));
+                    cudaError_t err = cudaGetLastError();        // Get error code
+
+                    if ( err != cudaSuccess )
+                    {
+                       printf("CUDA Error: %s\n", cudaGetErrorString(err));
+                       exit(-1);
+                    }
+
+                    dim3 grid_dim=vec.get_size(gpu) + block_size - 1;
+                    dim3 block_dim=block_size;
+
+                    find_maximum_kernel<data_type_vec, data_type_ret>
+                    <<<grid_dim,block_dim>>>
+                    (h_func, vec.get_data_pointer(), d_max, d_mutex, vec.get_size(gpu));
+
+                    cudaDeviceSynchronize();
+
+                    data_type_vec * h_max= (data_type_vec *)malloc(sizeof(data_type_vec));
+                    cudaMemcpy(h_max, d_max, sizeof(data_type_vec), cudaMemcpyDeviceToHost);
+                    result= *h_max;
+                }
             }
             #include "../templates/instantiated_templates_cuda_operations.hpp"
 
-        } //namespace cuda
-    } //namespace core
+        } //namespace core
+    } //namespace cuda
 } //namespace adaboost
 #endif
